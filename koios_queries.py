@@ -3,8 +3,7 @@ from time import sleep
 import pandas as pd
 from common_functions import name_2_hex
 from bech32_tools import wallet_to_stake
-import codecs
-import binascii
+
 
 
 
@@ -12,7 +11,6 @@ import binascii
 
 
 def get_sender_address(tx_hash, api_base_url):
-    response = None
     headers = {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
