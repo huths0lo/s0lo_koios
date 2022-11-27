@@ -268,3 +268,11 @@ def get_asset_owner(policy_id, asset_name, api_base_url):
     wallet_addr = response.json()[0]['payment_address']
     stake_addr = wallet_to_stake(wallet_addr, api_base_url)
     return wallet_addr, stake_addr
+
+
+def get_last_block(api_base_url):
+    headers = {'Accept': 'application/json'}
+    response = requests.get(f'{api_base_url}/tip', headers=headers, timeout=10)
+    if response.status_code != 200:
+        return None
+    return response.json()[0]['hash']
