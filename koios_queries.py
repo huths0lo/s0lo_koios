@@ -2,12 +2,82 @@ import requests
 from time import sleep
 import pandas as pd
 from common_functions import name_2_hex
-from bech32_tools import wallet_to_stake
+from bech32_tools import wallet_to_stake, get_asset_fingerprint
+
+handle_policy = 'f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a'
 
 
 
 
 
+def get_stake_utxos(stake_key, api_base_url):
+    all_utxos = []
+    wallet_addresses = get_account_addresses(stake_key, api_base_url)
+    if wallet_addresses == None:
+        return []
+    sleep(.1)
+    headers = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+    }
+    payload = f'\u007b"_addresses":['
+    for wallet in wallet_addresses:
+        payload += f'"{wallet}",'
+    payload = payload[:len(payload) - 1]
+    payload += ']\u007d'
+    response = requests.post(url=f'{api_base_url}/address_info', headers=headers, data=payload, timeout=10)
+    status = response.status_code
+    if status != 200:
+        return []
+    else:
+        response = response.json()
+    all_address_utxos = response
+    for address in all_address_utxos:
+        if int(address['balance']) != 0:
+            all_utxos.append(address)
+    if len(all_utxos) == 0:
+        return []
+    utxos = pd.DataFrame(index=None)
+    for item in all_utxos:
+        utxo_row = pd.DataFrame(item['utxo_set']).astype({'value': 'str'}).astype({'value': 'int'}).rename(columns={'tx_hash': 'TxHash', 'tx_index': 'TxIx', 'value': 'Lovelace'})
+        utxo_row = utxo_row.sort_values(by=['block_time'], ascending=True)
+        utxos = pd.concat([utxos, utxo_row])
+    utxos.reset_index(drop=True, inplace=True)
+    return utxos
+
+
+
+
+
+def get_account_addresses(stake_addr, api_base_url):
+    headers = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+    }
+    data = f'\u007b"_stake_addresses":["{stake_addr}"]\u007d'
+    response = requests.post(f'{api_base_url}/account_addresses', headers=headers, data=data, timeout=10)
+    status = response.status_code
+    response = response.json()
+    if status != 200 or len(response) == 0:
+        return []
+    return response[0]['addresses']
+
+
+
+
+
+
+
+
+
+
+
+def api_base_url_from_wallet(wallet):
+    if wallet[:6] == 'stake_' or wallet[:5] == 'addr_':
+        api_base_url = 'https://preprod.koios.rest/api/v0'
+    else:
+        api_base_url = 'https://api.koios.rest/api/v0'
+    return api_base_url
 
 
 def get_sender_address(tx_hash, api_base_url):
@@ -156,6 +226,8 @@ def assets_from_policy(policy_id, api_base_url):
     if response.status_code != 200:
         return None
     asset_json = response.json()
+    if len(asset_json) == 0:
+        return None
     all_assets = pd.DataFrame(data=None, index=None, columns=['asset_name', 'quantity'])
     i = 0
     while i < len(asset_json):
@@ -196,7 +268,7 @@ def get_cardano_price():
     return cardano_price
 
 
-def get_utxos(wallet_address, api_base_url):
+def get_utxos(wallet_address, api_base_url, filter_handles=False, filter_assets=False):
     sleep(1)
     headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
     payload = f'\u007b"_addresses":["{wallet_address}"]\u007d'
@@ -214,24 +286,82 @@ def get_utxos(wallet_address, api_base_url):
     utxos = pd.DataFrame(utxos[0]['utxo_set']).astype({'value': 'str'}).astype({'value': 'int'}).rename(columns={'tx_hash': 'TxHash', 'tx_index': 'TxIx', 'value': 'Lovelace'})
     utxos = utxos.sort_values(by=['block_time'], ascending=True)
     utxos.reset_index(drop=True, inplace=True)
+    if filter_handles == True:
+        utxos = hide_handles(utxos)
+    if filter_assets == True:
+        utxos = hide_assets(utxos)
     return utxos
 
 
+
+def hide_assets(utxos):
+    row_drop, i = [], 0
+    if len(utxos) == 0:
+        return utxos
+    while i < len(utxos):
+        asset_list = utxos['asset_list'][i]
+        if len(asset_list) != 0:
+            row_drop.append(i)
+        i += 1
+    utxos.drop(utxos.loc[row_drop].index, inplace=True)
+    utxos.reset_index(drop=True, inplace=True)
+    return utxos
+
+
+def hide_handles(utxos):
+    row_drop, i = [], 0
+    if len(utxos) == 0:
+        return utxos
+    while i < len(utxos):
+        asset_list = utxos['asset_list'][i]
+        if len(asset_list) == 1:
+            if asset_list[0]['policy_id'] == handle_policy:
+                row_drop.append(i)
+        i += 1
+    utxos.drop(utxos.loc[row_drop].index, inplace=True)
+    utxos.reset_index(drop=True, inplace=True)
+    return utxos
+
+
+
+
+def check_royalty_info(policy_id, api_base_url):
+    first_mint, royalty, fingerprint = False, None, get_asset_fingerprint(policy_id, '')
+    headers = {'Accept': 'application/json'}
+    response = requests.get(f'{api_base_url}/asset_policy_info?_asset_policy={policy_id}', headers=headers, timeout=30)
+    status = response.status_code
+    response = response.json()
+    if status == 200 and len(response) != 0:
+        first_mint = True
+        if response[0]['fingerprint'] == fingerprint:
+            if 'minting_tx_metadata' in response[0]:
+                if response[0]['minting_tx_metadata']['key'] == '777':
+                    royalty = response[0]['minting_tx_metadata']['json']
+    return first_mint, royalty
+
+
+
+
 def submit_tx_api(cbor_file, api_base_url):
-    status = None
+    status, attempts = None, 0
     headers = {'Content-Type': 'application/cbor'}
-    response = requests.post(f'{api_base_url}/submittx', headers=headers, data=cbor_file, timeout=10)
-    if response.status_code == 202:
-        status = response.json()
-    else:
-        sleep(.2)
-        response = requests.post(f'{api_base_url}/submittx', headers=headers, data=cbor_file, timeout=10)
+    while True:
+        if attempts >= 4:
+            return status
+        try:
+            response = requests.post(f'{api_base_url}/submittx', headers=headers, data=cbor_file, timeout=25)
+        except:
+            sleep(.2)
+            attempts += 1
+            continue
         if response.status_code == 202:
             status = response.json()
-        else:
-            status = response.text
+            break
+        sleep(.2)
+        attempts += 1
     return status
 
+#
 def check_tx_status(tx_id, api_base_url):
     sleep(.2)
     headers = {
@@ -249,7 +379,6 @@ def check_tx_status(tx_id, api_base_url):
 
 
 def wallet_stake_from_handle(ada_handle, api_base_url):
-    handle_policy = 'f0ff48bbb7bbe9d59a40f1ce90e9e9d0ff5002ec48f232b49ca0fb9a'
     asset_name = ada_handle[1:]
     wallet_addr, stake_addr = get_asset_owner(handle_policy, asset_name, api_base_url)
     return wallet_addr, stake_addr
@@ -263,11 +392,53 @@ def get_asset_owner(policy_id, asset_name, api_base_url):
         'Content-Type': 'application/json'
     }
     response = requests.get(f'{api_base_url}/asset_address_list?_asset_policy={policy_id}&_asset_name={hex_name}', headers=headers, timeout=10)
-    if not response.ok:
+    if not response.ok or len(response.json()) == 0:
         return None, None
     wallet_addr = response.json()[0]['payment_address']
     stake_addr = wallet_to_stake(wallet_addr, api_base_url)
     return wallet_addr, stake_addr
+
+
+def multi_wallet_utxos(mainnet_wallet, testnets_wallet):
+    mainnet_utxos = get_utxos(mainnet_wallet, set_correct_api('mainnet'))
+    preprod_utxos = get_utxos(testnets_wallet, set_correct_api('preprod'))
+    preview_utxos = get_utxos(testnets_wallet, set_correct_api('preview'))
+    if len(mainnet_utxos) == 0 and len(preprod_utxos) == 0 and len(preview_utxos) == 0:
+        return []
+    utxos = pd.DataFrame(data=None, index=None)
+    if len(mainnet_utxos) != 0 and type(mainnet_utxos) != str:
+        i = 0
+        while i < len(mainnet_utxos):
+            tx_hash, tx_ix, asset_list, ll_in = mainnet_utxos['TxHash'][i], mainnet_utxos['TxIx'][i], mainnet_utxos['asset_list'][i], mainnet_utxos['Lovelace'][i]
+            temp_row = pd.DataFrame([[f'{tx_hash}#{tx_ix}', tx_hash, tx_ix, asset_list, ll_in, 'mainnet']],columns=['full_utxo', 'tx_hash', 'tx_ix', 'asset_list', 'll_in', 'network'])
+            utxos = pd.concat([utxos,temp_row])
+            i += 1
+    if len(preprod_utxos) != 0 and type(preprod_utxos) != str:
+        i = 0
+        while i < len(preprod_utxos):
+            tx_hash, tx_ix, asset_list, ll_in = preprod_utxos['TxHash'][i], preprod_utxos['TxIx'][i], preprod_utxos['asset_list'][i], preprod_utxos['Lovelace'][i]
+            temp_row = pd.DataFrame([[f'{tx_hash}#{tx_ix}', tx_hash, tx_ix, asset_list, ll_in, 'preprod']],columns=['full_utxo', 'tx_hash', 'tx_ix', 'asset_list', 'll_in', 'network'])
+            utxos = pd.concat([utxos, temp_row])
+            i += 1
+    if len(preview_utxos) != 0 and type(preview_utxos) != str:
+        i = 0
+        while i < len(preview_utxos):
+            tx_hash, tx_ix, asset_list, ll_in = preview_utxos['TxHash'][i], preview_utxos['TxIx'][i], preview_utxos['asset_list'][i], preview_utxos['Lovelace'][i]
+            temp_row = pd.DataFrame([[f'{tx_hash}#{tx_ix}', tx_hash, tx_ix, asset_list, ll_in, 'preview']],columns=['full_utxo', 'tx_hash', 'tx_ix', 'asset_list', 'll_in', 'network'])
+            utxos = pd.concat([utxos,temp_row])
+            i += 1
+    utxos.reset_index(drop=True, inplace=True)
+    return utxos
+
+def set_correct_api(network):
+    mainnet_api, preprod_api, preview_api = 'https://api.koios.rest/api/v0', 'https://preprod.koios.rest/api/v0', 'https://preview.koios.rest/api/v0'
+    if network == 'mainnet':
+        api_base_url = mainnet_api
+    elif network == 'preprod':
+        api_base_url = preprod_api
+    elif network == 'preview':
+        api_base_url = preview_api
+    return api_base_url
 
 
 def get_last_block(api_base_url):
